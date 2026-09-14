@@ -110,6 +110,38 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(len(rows),300)
         self.assertTrue(any(event["event"]=="prefetch" for event in self.db.store.cache.events))
         self.assertGreater(self.db.stats()["hits"],0)
+    def test_storage_integration_exposes_insert_scan_delete_effects(self):
+        self.db.execute("CREATE TABLE bulk(id INT,name VARCHAR(20));")
+        inserts="".join(f"INSERT INTO bulk(id,name) VALUES({i},'row{i}');" for i in range(300))
+        before=self.db.stats()
+        self.db.execute(inserts)
+        pages=self.db.store.get_table_pages("bulk")
+        after_insert=self.db.stats()
+        self.assertGreaterEqual(len(pages),2)
+        self.assertGreater(after_insert["allocated_pages"],before["allocated_pages"])
+        self.db.store.cache.events.clear()
+        selected=self.db.execute("SELECT id FROM bulk WHERE id>=295 ORDER BY id;")[0]["rows"]
+        self.assertEqual([r["id"] for r in selected],[295,296,297,298,299])
+        self.assertTrue(any(event["event"] in ("prefetch","prefetch-skip") for event in self.db.store.cache.events))
+        self.assertGreater(self.db.stats()["hits"],0)
+        self.db.store.cache.events.clear()
+        deleted=self.db.execute("DELETE FROM bulk WHERE id>=298;")[0]
+        self.assertEqual(deleted["affected"],2)
+        delete_events=[event["event"] for event in self.db.store.cache.events]
+        self.assertIn("dirty",delete_events)
+        self.assertIn("flush",delete_events)
+    def test_database_uses_os_table_mapping_and_recovers_it_after_restart(self):
+        self.db.execute("CREATE TABLE mapped(id INT,name VARCHAR(20));")
+        inserts="".join(f"INSERT INTO mapped(id,name) VALUES({i},'row{i}');" for i in range(300))
+        self.db.execute(inserts)
+        pages=self.db.store.get_table_pages("mapped")
+        self.assertGreaterEqual(len(pages),2)
+        self.assertEqual(self.db.catalog.table("mapped").first_page,pages[0])
+        root=self.tmp.name;self.db.close();self.db=Database(root,2)
+        recovered_pages=self.db.store.get_table_pages("mapped")
+        self.assertEqual(recovered_pages,pages)
+        rows=self.db.execute("SELECT id FROM mapped WHERE id>=297 ORDER BY id;")[0]["rows"]
+        self.assertEqual([r["id"] for r in rows],[297,298,299])
 
 
 if __name__=="__main__":unittest.main()

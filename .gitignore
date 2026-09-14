@@ -8,6 +8,7 @@ os_sim_demo/
 .pytest_cache/
 .coverage
 .DS_Store
+.idea/
 tmp/
 docs/assets/accepted-concept.png
 docs/assets/ppt2-montage.png

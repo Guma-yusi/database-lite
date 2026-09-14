@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import shutil
 import sqlite3
 import sys
 from datetime import date, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
 from urllib.parse import parse_qs, urlparse
 from minidb import Database as MiniDatabase
 from minidb.errors import MiniDBError
-from os_sim import StorageService
-from os_sim.page_file import PAYLOAD_SIZE
+from os_sim import QueryScheduler, StorageService
+from os_sim.cache import PageCache
+from os_sim.page_file import PAGE_SIZE, PAYLOAD_SIZE
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "library.db"
 STATIC = ROOT / "static"
+OS_STORE_PATH = ROOT / "os_sim_demo"
+CACHE_POLICIES = list(PageCache.SUPPORTED_POLICIES)
 MINIDB = MiniDatabase(ROOT / "minidb_demo", buffer_pages=8)
-OS_STORE = StorageService(ROOT / "os_sim_demo", cache_pages=8, policy="LRU", dirty_ratio=.75)
+OS_STORE = StorageService(OS_STORE_PATH, cache_pages=8, policy="LRU", dirty_ratio=.75, background_interval=2.0)
+OS_STORE_LOCK = Lock()
 if "student" not in MINIDB.catalog.tables:
     MINIDB.execute("CREATE TABLE student(id INT,name VARCHAR(20),age INT); INSERT INTO student(id,name,age) VALUES(1,'Alice',20); INSERT INTO student(id,name,age) VALUES(2,'Bob',17);")
 
@@ -46,6 +52,74 @@ def init_db(reset=False):
 
 def rows(cursor):
     return [dict(row) for row in cursor.fetchall()]
+
+
+def os_status():
+    with OS_STORE_LOCK:
+        return {
+            "stats": OS_STORE.stats(),
+            "pages": OS_STORE.page_directory(),
+            "frames": [
+                {
+                    "page_id": f.page_id,
+                    "generation": f.generation,
+                    "dirty": f.dirty,
+                    "pin_count": f.pin_count,
+                    "page_lsn": f.page_lsn,
+                    "hits": f.hits,
+                    "ref_bit": f.ref_bit,
+                }
+                for f in OS_STORE.cache.frames.values()
+            ],
+            "events": OS_STORE.cache.recent_events(30),
+            "policies": CACHE_POLICIES,
+        }
+
+
+def os_page_detail(page_id):
+    with OS_STORE_LOCK:
+        control = OS_STORE.file.control
+        frame = OS_STORE.cache.frames.get(page_id)
+        allocated = 0 <= page_id < len(control["allocated"]) and control["allocated"][page_id]
+        detail = {
+            "page_id": page_id,
+            "page_size": PAGE_SIZE,
+            "allocated": allocated,
+            "cached": frame is not None,
+            "generation": frame.generation if frame else (control["page_generations"][page_id] if 0 <= page_id < len(control["page_generations"]) else 0),
+            "checksum": control["checksums"][page_id] if 0 <= page_id < len(control["checksums"]) else 0,
+            "offset": page_id * PAGE_SIZE,
+        }
+        if not allocated:
+            detail.update({"preview_text": "", "hex_rows": [], "ascii_rows": []})
+            return detail
+        payload = frame.payload if frame else OS_STORE.file._read_raw(page_id)
+        preview = payload[:128]
+        hex_rows, ascii_rows = [], []
+        for start in range(0, min(len(preview), 64), 16):
+            chunk = preview[start:start + 16]
+            hex_rows.append(" ".join(f"{byte:02X}" for byte in chunk))
+            ascii_rows.append("".join(chr(byte) if 32 <= byte < 127 else "." for byte in chunk))
+        detail.update({
+            "preview_text": preview.rstrip(b"\x00").decode("utf-8", errors="replace"),
+            "hex_rows": hex_rows,
+            "ascii_rows": ascii_rows,
+        })
+        return detail
+
+
+def rebuild_os_store(policy="LRU", reset=False):
+    global OS_STORE
+    if policy not in CACHE_POLICIES:
+        raise ApiError(400, "不支持的缓存策略")
+    with OS_STORE_LOCK:
+        OS_STORE.close(clean=not reset)
+        if reset:
+            shutil.rmtree(OS_STORE_PATH, ignore_errors=True)
+        else:
+            (OS_STORE_PATH / "cache_events.ndjson").unlink(missing_ok=True)
+        OS_STORE = StorageService(OS_STORE_PATH, cache_pages=8, policy=policy, dirty_ratio=.75, background_interval=2.0)
+    return os_status()
 
 
 class ApiError(Exception):
@@ -122,7 +196,13 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/minidb/status":
                 return self.send_json({"catalog":MINIDB.catalog.rows(),"pages":MINIDB.store.page_directory(),"buffer":MINIDB.stats()})
             if path == "/api/os/status":
-                return self.send_json({"stats":OS_STORE.stats(),"pages":OS_STORE.page_directory(),"frames":[{"page_id":f.page_id,"generation":f.generation,"dirty":f.dirty,"pin_count":f.pin_count,"page_lsn":f.page_lsn} for f in OS_STORE.cache.frames.values()],"events":OS_STORE.cache.events[-30:]})
+                return self.send_json(os_status())
+            if path == "/api/os/page":
+                try:
+                    page_id = int(query.get("page_id", ["0"])[0])
+                except ValueError:
+                    raise ApiError(400, "page_id 必须是整数")
+                return self.send_json(os_page_detail(page_id))
         raise ApiError(404, "接口不存在")
 
     def do_POST(self):
@@ -169,6 +249,18 @@ class Handler(SimpleHTTPRequestHandler):
                         if len(raw)>PAYLOAD_SIZE:raise ApiError(400,"内容超过一页容量")
                         result={"lsn":OS_STORE.write_page(pid,raw+bytes(PAYLOAD_SIZE-len(raw)))}
                     elif action=="checkpoint":result=OS_STORE.checkpoint()
+                    elif action=="set_policy":
+                        policy=str(data.get("policy","")).upper()
+                        return self.send_json({"message":f"缓存策略已切换为 {policy}","status":rebuild_os_store(policy=policy, reset=False)})
+                    elif action=="reset":
+                        policy=str(data.get("policy", OS_STORE.cache.policy)).upper()
+                        return self.send_json({"message":"OS 仿真台已重置","status":rebuild_os_store(policy=policy, reset=True)})
+                    elif action=="workload":
+                        allocated=[p["page_id"] for p in OS_STORE.page_directory() if p["allocated"]]
+                        if not allocated:allocated=[OS_STORE.allocate_page()]
+                        scheduler=QueryScheduler(workers=8,queue_capacity=64)
+                        futures=[scheduler.submit(OS_STORE.read_page,allocated[i%len(allocated)]) for i in range(1000)]
+                        [f.result() for f in futures];result=scheduler.stats();scheduler.close()
                     else:raise ApiError(400,"未知 OS 仿真动作")
                     return self.send_json({"result":result,"status":OS_STORE.stats()})
             raise ApiError(404, "接口不存在")

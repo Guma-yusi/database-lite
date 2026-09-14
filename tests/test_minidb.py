@@ -100,6 +100,16 @@ class EndToEndTests(unittest.TestCase):
         self.assertFalse((Path(root)/"catalog.json").exists())
         self.assertEqual(self.db.store.read_page(0)[:4],b"SYP1")
         self.assertGreaterEqual(self.db.stats()["allocated_pages"],3)
+    def test_seq_scan_prefetches_next_page(self):
+        self.db.execute("CREATE TABLE bulk(id INT,name VARCHAR(20));")
+        inserts="".join(f"INSERT INTO bulk(id,name) VALUES({i},'row{i}');" for i in range(300))
+        self.db.execute(inserts)
+        root=self.tmp.name;self.db.close();self.db=Database(root,2)
+        self.db.store.cache.events.clear()
+        rows=self.db.execute("SELECT id FROM bulk;")[0]["rows"]
+        self.assertEqual(len(rows),300)
+        self.assertTrue(any(event["event"]=="prefetch" for event in self.db.store.cache.events))
+        self.assertGreater(self.db.stats()["hits"],0)
 
 
 if __name__=="__main__":unittest.main()

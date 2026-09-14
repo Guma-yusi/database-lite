@@ -13,7 +13,7 @@ def fixed_payload(text):
 
 def main():
     parser=argparse.ArgumentParser(description="MiniDB 独立 OS 存储仿真实体")
-    parser.add_argument("--data",default="os_sim_data");parser.add_argument("--policy",choices=["LRU","FIFO"],default="LRU");parser.add_argument("--cache-pages",type=int,default=8)
+    parser.add_argument("--data",default="os_sim_data");parser.add_argument("--policy",choices=["FIFO","LFU","LRU","CLOCK"],default="LRU");parser.add_argument("--cache-pages",type=int,default=8)
     sub=parser.add_subparsers(dest="command",required=True)
     sub.add_parser("status");sub.add_parser("allocate")
     release=sub.add_parser("release");release.add_argument("page_id",type=int)
@@ -23,7 +23,13 @@ def main():
     args=parser.parse_args()
     store=StorageService(Path(args.data),args.cache_pages,args.policy)
     try:
-        if args.command=="status":result={"stats":store.stats(),"allocated":[p for p in store.page_directory() if p["allocated"]]}
+        if args.command=="status":
+            result={
+                "stats":store.stats(),
+                "allocated":[p for p in store.page_directory() if p["allocated"]],
+                "frames":[{"page_id":f.page_id,"generation":f.generation,"dirty":f.dirty,"pin_count":f.pin_count,"page_lsn":f.page_lsn} for f in store.cache.frames.values()],
+                "events":store.cache.recent_events(30),
+            }
         elif args.command=="allocate":result={"page_id":store.allocate_page()}
         elif args.command=="release":store.release_page(args.page_id);result={"released":args.page_id}
         elif args.command=="read":result={"page_id":args.page_id,"text":store.read_page(args.page_id).rstrip(b"\0").decode("utf-8")}

@@ -1,6 +1,6 @@
 # 拾页 MiniDB
 
-一个把编译原理、操作系统和数据库原理串起来的教学型数据库。SQL 经过 Token、AST、语义检查、逻辑计划和规则优化，再由执行器通过统一页接口访问自研 4KB Page、LRU/FIFO Cache、WAL 与二进制表空间。基础范围严格对应课程指导书；每部分最多保留两个容易解释的扩展。MiniDB 内核不使用 SQLite，原图书室页面仅作为独立的上层业务演示保留。
+一个把编译原理、操作系统和数据库原理串起来的教学型数据库。SQL 经过 Token、AST、语义检查、逻辑计划和规则优化，再由执行器通过统一页接口访问自研 4KB Page、FIFO/LRU/LFU/CLOCK Cache、顺序扫描 Prefetch、WAL 与二进制表空间。基础范围严格对应课程指导书；每部分最多保留两个容易解释的扩展。MiniDB 内核不使用 SQLite，原图书室页面仅作为独立的上层业务演示保留。
 
 ## 快速启动
 
@@ -27,7 +27,7 @@ DELETE FROM student WHERE id = 1;
 SQL → Lexer/Token → Parser/AST → Semantic/Catalog
     → Logical Plan → Rule Optimizer → Executor
     → TableHeap/RID → OSBufferAdapter → StorageService
-    → LRU/FIFO Cache → WAL → 4KB PageFile
+    → FIFO/LRU/LFU/CLOCK Cache + Prefetch → WAL → 4KB PageFile
 ```
 
 ## 目录
@@ -68,7 +68,7 @@ py -3 os_sim_cli.py status
 py -3 benchmarks/os_benchmark.py
 ```
 
-浏览器访问 <http://127.0.0.1:8000/?os=1>，可以观察 Extent 页目录、Buffer Frames、脏页、WAL/Checkpoint LSN 和缓存事件。
+浏览器访问 <http://127.0.0.1:8000/?os=1>，可以观察 Extent 页目录、Buffer Frames、脏页、WAL/Checkpoint LSN、策略切换、页详情十六进制预览和缓存事件。
 
 第二份 PPT 对应资料见 `docs/操作系统模块验收矩阵.md`、`操作系统模块设计取舍.md`、`操作系统模块效果证据.md` 和 `操作系统代码答辩.md`。
 

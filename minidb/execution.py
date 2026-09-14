@@ -44,9 +44,13 @@ class TableHeap:
             yield pid
             with self.buffer.page(pid) as page:pid=page.next_page
     def scan(self,schema):
-        for pid in self._pages(schema):
+        pid=schema.first_page
+        while pid is not None and pid!=NO_PAGE:
             with self.buffer.page(pid) as page:
+                next_pid=page.next_page
+                if next_pid!=NO_PAGE:self.buffer.prefetch(next_pid)
                 for slot,payload in page.records():yield (pid,slot),self.codec.decode(schema,payload)
+            pid=next_pid
     def insert(self,schema,row):
         payload=self.codec.encode(schema,row);last=None
         for pid in self._pages(schema):
@@ -54,7 +58,7 @@ class TableHeap:
             with self.buffer.page(pid) as page:
                 slot=page.insert(payload)
                 if slot is not None:return pid,slot
-        page=self.buffer.new_page();pid=page.page_id;slot=page.insert(payload)
+        page=self.buffer.new_table_page(schema.name);pid=page.page_id;slot=page.insert(payload)
         if slot is None:
             self.buffer.discard_page(pid)
             raise StorageError("record is larger than one page")

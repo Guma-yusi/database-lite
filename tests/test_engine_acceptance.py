@@ -79,6 +79,15 @@ class EngineAcceptanceTests(unittest.TestCase):
         finally:
             cli_db.close()
 
+    def test_table_page_mapping_and_prefetch_are_visible_through_engine(self):
+        self.db.execute("CREATE TABLE bulk(id INT,name VARCHAR(20));")
+        self.db.execute("".join(f"INSERT INTO bulk(id,name) VALUES({i},'row{i}');" for i in range(300)))
+        self.assertGreaterEqual(len(self.db.store.get_table_pages("bulk")), 2)
+        self.db.store.cache.events.clear()
+        rows = self.db.execute("SELECT id FROM bulk ORDER BY id DESC;")[0]["rows"]
+        self.assertEqual(rows[0], {"id": 299})
+        self.assertTrue(any(event["event"] in ("prefetch", "prefetch-skip") for event in self.db.store.cache.events))
+
 
 if __name__ == "__main__":
     unittest.main()

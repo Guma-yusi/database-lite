@@ -92,6 +92,27 @@ class SemanticAndPlanAcceptanceTests(unittest.TestCase):
         self.assertEqual((plan.kind, plan.children[0].kind, plan.children[0].children[0].kind),
                          ("Project", "Filter", "SeqScan"))
 
+    def test_inspect_reports_all_statements_without_mutating_catalog(self):
+        from minidb import Database
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(directory)
+            result = db.inspect("CREATE TABLE staged(id INT); INSERT INTO staged(id) VALUES(1); SELECT id FROM staged;")
+            self.assertEqual([item["tokens"][0]["lexeme"] for item in result], ["CREATE", "INSERT", "SELECT"])
+            self.assertFalse(db.catalog.exists("staged"))
+            db.close()
+
+    def test_optimizer_removes_tautology_from_filter(self):
+        from minidb import Database
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(directory)
+            db.execute("CREATE TABLE student(id INT,name VARCHAR(5));")
+            info = db.inspect("SELECT name FROM student WHERE 1=1 AND id>=1;")[0]
+            self.assertIn("1 = 1", info["plan_before"])
+            self.assertNotIn("1 = 1", info["plan_after"])
+            db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

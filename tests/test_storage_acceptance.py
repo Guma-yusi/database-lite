@@ -88,6 +88,31 @@ class PageFileAndCacheAcceptanceTests(unittest.TestCase):
             reopened = PageFile(directory)
             self.assertEqual(reopened.read_page(page_id)[0], b"z" * PAGE_SIZE)
 
+    def test_table_page_mapping_persists_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StorageService(directory)
+            p0 = store.append_table_page("books")
+            p1 = store.append_table_page("books")
+            store.close()
+            reopened = StorageService(directory)
+            self.assertEqual(reopened.get_table_pages("books"), [p0, p1])
+            reopened.close()
+
+    def test_replace_log_contains_victim_new_page_and_flush_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StorageService(directory, cache_pages=2, policy="LRU")
+            pages = [store.allocate_page() for _ in range(3)]
+            for page_id in pages[:2]:
+                store.read_page(page_id)
+            store.write_page(pages[0], b"d" * PAGE_SIZE)
+            store.read_page(pages[2])
+            replace = [e for e in store.cache.recent_events(20) if e["event"] == "replace"][-1]
+            self.assertIn("victim_page_id", replace)
+            self.assertIn("new_page_id", replace)
+            self.assertIn("dirty", replace)
+            self.assertIn("flushed", replace)
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()
